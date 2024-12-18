@@ -1,0 +1,661 @@
+---
+title: "Homework 2"
+author: "Raul Torres Aragon"
+date: "4/22/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tseries)
+library(tidyverse)
+d <- read.csv("pset2_data.csv")
+```
+
+
+
+# Problem 1: Analyzing US House seat shares using ARMA  
+
+### (a)  
+[10 points.] Plot the time series DemHouseMaj and plot its ACF and PACF. Perform augmented Dickey-Fuller and Phillips-Peron tests for unit roots. Describe your findings, being sure to describe what kind(s) of time series process may be at work. Now “demean” the data by period, removing the pre-1994 mean from cases before 1994, and the post-1994 mean from cases after 1994. Make new time series, ACF, and PACF plots. If 1994 represents a “structural break” in the level of the Democratic majority, what effect does that have on your diagnosis of the behavior of the time series?  
+
+```{r 1a1}
+dem_house_maj <- ts(d$DemHouseMaj)
+xlabs <- unique(d$StartYear)
+plot(dem_house_maj, ylab = "Democratic House Majority", xaxt = "n")
+axis(1, at = seq(1, 28, by=5), labels = xlabs[seq(1, 28, by=5)])
+```  
+```{r 1a2}
+par(mfrow = c(1,2))
+acf(dem_house_maj, main = "")
+pacf(dem_house_maj, main = "")
+mtext("Democratic majority from 1963", side = 3, line = -1, outer = TRUE)
+```  
+```{r 1a3}
+dft <- adf.test(dem_house_maj)
+ppt <- pp.test(dem_house_maj, alternative = "stationary")
+```
+*The time plot suggests there might be declining trend, but knowing the nature of the time series (majority of a political party in the US), it's not definitive that a lower trend will persist.*  
+*The ACF and suggests there is autoregression at work: there is a geometric decline after the first lag. The PACF plot shows that there are no significant autocorrelated lags after the first one. This is evidence that this time series has an AR(1) structure.*  
+*Given the Dickey-Fuller test, (pval = `r round(dft$p.value,3)`) we conclude the time series is stationary, meaning it is not a random walk.*  
+*The Phillips-Perron test, on the other hand, suggests this time series is non-stationary (pval = `r round(ppt$p.value, 3)`)*  
+*Given how short this time series is, it is very possible the root tests are inconclusive and in contradiction with each other as we saw.*  
+
+```{r}
+y1993 <- which(d$StartYear == 1993)
+y1995 <- which(d$StartYear == 1995)
+pre94mean  <- mean(dem_house_maj[1:y1993])
+post94mean <- mean(dem_house_maj[y1995:length(dem_house_maj)])
+dem_house_maj_demeaned <- c(dem_house_maj[1:y1993] - pre94mean, 
+                            dem_house_maj[y1995:length(dem_house_maj)]-post94mean) |> ts()
+```  
+
+```{r}
+xlabs <- unique(d$StartYear)
+plot(dem_house_maj_demeaned, ylab = "Democratic House Majority (demeaned)", xaxt = "n")
+axis(1, at = seq(1, 28, by=5), labels = xlabs[seq(1, 28, by=5)])
+abline(v=y1993+1)
+```  
+```{r}
+par(mfrow = c(1,2))
+acf(dem_house_maj_demeaned, main = "")
+pacf(dem_house_maj_demeaned, main = "")
+mtext("Democratic majority from 1963 (demeaned)", side = 3, line = -1, outer = TRUE)
+```  
+
+*Assuming there is no "structural break" at all in the whole time series, then de-meaning the series (with the oveall mean) should stabilize the whole time series. Now, if there is a "structural break" at period = t then the pre-t mean should stabilize the time series prior to period t, and the post-1994 mean should stabilize the time series post t. Thus, here, we see that it does appear like there is a structural break at 1994 given that trend and autocorrelation are not present in the demeaned time series--based on the time, ACF, PACF plots.*
+
+### (b)  
+Fit an AR(0) regression to the time series <code>DemHouseMaj</code> controlling for the covariates <cide>PartisanMidterm</code>, <code>PartisanUnem</code>, and <code>Coattails</code>, which test the three theories mentioned above. Also control for <code>Pre1994</code> to allow for a structural break. Present the results in a table, being sure to note the coefficients, their standard errors, the AIC for the entire model, the standard error of the regression, and the number of observations. Format the table nicely, as if for a paper, and describe what you have found substantively as well as you can.  
+
+```{r results = 'asis'}
+xcovariates <- cbind(d$PartisanMidterm, d$PartisanUnem, d$Coattails, d$Pre1994)
+mod_ar0 <- arima(dem_house_maj, 
+                 order = c(0,0,0), 
+                 xreg = xcovariates,
+                 include.mean = TRUE)
+names <- c("Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+
+make_table <- function(model, names, model_name) {
+    rmse   <- sqrt(model$residuals^2) |> mean()
+    aic    <- model$aic
+    coeffs <- model$coef |> unname() 
+    SEs    <- diag(model$var.coef) |> unname() |> sqrt() 
+    N      <- length(model$residuals)
+    names  <- names
+    
+    mytable <- data.frame(Names = names,
+                          Coefficients = round(coeffs, 1) |> as.character(), 
+                          `Std.Errors` = paste0("(", as.character(round(SEs, 2)), ")")
+                          ) |> tidyr::pivot_longer(c("Coefficients","Std.Errors"))
+    
+    row1 <- data.frame(Names = "AIC" , name = "", value = as.character(round(aic, 1)))
+    row2 <- data.frame(Names = "RMSE", name = "", value = as.character(round(rmse, 1)))
+    row3 <- data.frame(Names = "N"   , name = "", value = as.character(N))
+    
+    mytable <- mytable |> dplyr::bind_rows(row1, row2, row3)
+    names(mytable) <- c("Parameters", "Type", model_name)
+    mytable
+}
+
+mytable <- make_table(mod_ar0, names, model_name = "AR(0)")
+pretty_tab <- mytable[,-2]
+knitr::kable(pretty_tab)
+```  
+*Fitting an AR(0) model is equivalent to fitting OLS because AR(0) means no auto regressive process. Thus, after fitting AR(0) model, we see that "clinging to the president's coattails" seems to be the only theory that holds water. In other words, given this no autoregression model, there appears to be an 18.4 change in the Democratic majority when the incoming president is also from the Democratic party.*  
+
+*Furthermore, the regression line does have a different intercept for before the 1994 election and after the 1994 election, meaning that the average Democratic majority is significantly different before 1994 than after 1994 (a 48 elected officials difference after 1994).* 
+
+### (c)  
+Now fit the following additional models and add them to the table you made in part b:  
+(i.) an AR(1) model;  
+(ii.) an AR(2) model;  
+(iii.) an MA(1) model;  
+(iv.) an ARMA(1,1) model.  
+Make sure to include the same four controls as in part b.  
+Discuss the substantive and statistical similarities and differences across all five fitted models.  
+
+```{r results = 'asis'}
+mod_ar1 <- arima(dem_house_maj, 
+                 order = c(1,0,0), 
+                 xreg = xcovariates,
+                 include.mean = TRUE)
+names_ar1 <-  c("AR(1)","Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- mytable |> full_join(make_table(mod_ar1, names_ar1, "AR(1)"), by = c("Parameters","Type"))
+
+mod_ar2 <- arima(dem_house_maj, 
+                 order = c(2,0,0), 
+                 xreg = xcovariates,
+                 include.mean = TRUE)
+names_ar2 <-  c("AR(1)","AR(2)","Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- mytable |> full_join(make_table(mod_ar2, names_ar2, "AR(2)"), by = c("Parameters","Type"))
+
+mod_ma1 <- arima(dem_house_maj, 
+                 order = c(0,0,1), 
+                 xreg = xcovariates,
+                 include.mean = TRUE)
+names_ma1 <-  c("MA(1)","Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- mytable |> full_join(make_table(mod_ma1, names_ma1, "MA(1)"), by = c("Parameters","Type"))
+
+mod_arma1 <- arima(dem_house_maj, 
+                   order = c(1,0,1), 
+                   xreg = xcovariates,
+                   include.mean = TRUE)
+names_arma1 <-  c("AR(1)","MA(1)",
+                  "Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- mytable |> full_join(make_table(mod_arma1, names_arma1, "ARMA(1,1)"), by = c("Parameters","Type"))
+
+pretty_tab <- mytable[,-2] |> 
+              replace_na(replace = list(`AR(0)` = " ", 
+                                        `AR(1)` = " ", 
+                                        `AR(2)` = " ", 
+                                        `MA(1)` = " ", 
+                                        `ARMA(1,1)` = " "))
+knitr::kable(pretty_tab)
+```  
+*In terms of goodness of fit (in sample RMSE and AIC) most models seem in the same ballpark. ARMA(1,1) has the lowest AIC (238), but it's only two points below AR(1) which has the highest AIC (240). There is not a clear outperformer. The Coattails theory seems to hold water given that all models found it to be large and statistically significant. The same goes for the pre-1994 indicator, suggesting that indeed the 1994 was a significant watershed.*  
+
+### (d)  
+Perform a rolling-windows cross-validation of all five models using a window of 20 periods and forecasting forward 3 periods. Place in a table the following goodness of fit statistics for all five models: AIC, in-sample root mean squared error, and the cross-validation mean absolute error (MAE) up to 1, 2, and 3 periods ahead, respectively, as well as the average of these three cross-validation MAEs. Based on these statistics, select a final “best” model.  
+
+```{r}
+ts_cv <- function(
+    ts, # ts object
+    order, # order of ARMA model. eg, c(1,0,0)
+    xcovars, # matrix of covariates, use cbind to construct. eg, cbind(df$x1, df$x2, ..., df$xk)
+    include_mean, # include intercept in ARIMA model TRUE/FALSE
+    min_window = 5, # minimum length of training set K
+    forward = 1, # number of forward periods when forecasting
+    sliding_trainset = TRUE, # TRUE = sliding window; FALSE = expanding window scheme
+    seasonal = NA
+    ) {
+    stopifnot(class(ts) == "ts")
+    ts_start <- tsp(ts)[1] # the starting point of ts t
+    ts_end <- tsp(ts)[2] # the end point of ts
+    ts_freq <- tsp(ts)[3] # the frequency of ts
+    ts_length <- length(ts) # The total length of time series T
+
+    # CV 
+    n_iters <- ts_length - min_window
+    mae <- matrix(NA, nrow = n_iters, ncol = forward) # initialize a matrix to store performance metrics
+    for (i in 1:n_iters) {
+      # compute the starting and end points of training and test sets
+      if (sliding_trainset == TRUE) {
+        train_start <- ts_start + (i - 1) / ts_freq
+      } else {
+        train_start <- ts_start
+      }
+      train_end <- ts_start + (i - 1 + min_window - 1) / ts_freq
+      test_start <- ts_start + (min_window + i - 1) / ts_freq
+      test_end <- min(ts_start + (min_window + i - 1 + forward - 1) / ts_freq, ts_end)
+      
+      # construct training and test sets
+      train_set <- window(ts, start = train_start, end = train_end)
+      test_set <- window(ts, start = test_start, end = test_end)
+      
+      # also truncate covariates time series to the same length
+      x_train <- window(xcovars, start = train_start, end = train_end)
+      x_test <- window(xcovars, start = test_start, end = test_end)
+      
+      # run model on training set
+      train_fit <- forecast::Arima(train_set, order=order, xreg=x_train, include.mean=include_mean, seasonal=seasonal)
+      
+      # compute performance metrics on test set
+      pred <- forecast::forecast(train_fit, h = forward, xreg = x_test)
+      mae[i, 1:length(test_set)] <- abs(pred$mean - test_set)
+    }
+    #print(mae)
+    # average performance metrics across iterations
+    mae <- colMeans(mae, na.rm = TRUE)
+    return(mae)
+}
+```  
+```{r}
+orders <- list(c(0,0,0), c(1,0,0), c(2,0,0), c(0,0,1), c(1,0,1))
+results <- sapply(orders, ts_cv, ts = dem_house_maj,
+                                 xcovars = xcovariates,
+                                 include_mean = TRUE,
+                                 min_window = 20,
+                                 sliding_trainset = TRUE,
+                                 forward = 3) |> t()
+```
+```{r, echo = FALSE}
+AICs <- pretty_tab[which(pretty_tab$Parameters == "AIC"), 2:6] |> unlist() |> as.vector()
+RMSEs <- pretty_tab[which(pretty_tab$Parameters == "RMSE"), 2:6] |> unlist() |> as.vector()
+
+results_df <- as.data.frame(round(results,1)) |> 
+              dplyr::mutate(models = c("ar(0)","ar(1)","ar(2)","ma(1)","arma(1,1)"),
+                            RMSE = RMSEs, AIC = AICs)
+names(results_df) <- c("MAE p1", "MAE p2", "MAE p3", "models", "RMSE", "AIC")
+
+results_tab <- results_df |> dplyr::select(models, RMSE, AIC, starts_with("MAE"),)
+knitr::kable(results_tab, caption = "Goodness of Fit")
+```  
+```{r, echo = FALSE}
+plot_df <- t(results) |> as.data.frame()
+col_names <- c("AR0","AR1","AR2","MA1","ARMA11")
+names(plot_df) <- col_names
+#plot_df$periods <- 1:3
+plot_df <- plot_df |> mutate(periods = 1:3) |> pivot_longer(col_names, names_to = "model", values_to = "MAE")
+ggplot2::ggplot(plot_df, aes(x = periods, y=MAE, color = model, group = model)) +
+    scale_x_continuous(breaks = c(1,2,3)) + 
+    scale_y_continuous(breaks = seq(floor(min(plot_df$MAE)), ceiling(max(plot_df$MAE)), by = 1)) +
+    labs(x = "Periods", y = "Mean Average Error") + 
+    ggtitle("Cross-validation of Congressional Seats") +
+    theme(panel.grid = element_blank(),
+          panel.background = element_blank(),
+          legend.position = "none",
+          plot.title = element_text(hjust = 0.5)) +
+    geom_line(size = 1.2) + 
+    geom_text(aes(y = ifelse(plot_df$periods==3, plot_df$MAE, NA), x = 3, label = model, vjust = 1.2)) +
+    scale_color_brewer(palette = "Dark2")
+```  
+
+*Difficult to decide what model is best. MA(1) is the lowest CV-MAE forecasting one period ahead, but it's the worst 3 periods out. The opposite is true for AR(2). AR(0), on the other hand, is consistently low in all periods. Given that it's also the most parsimonious model, that's the one I'd probably choose.*  
+
+### (e)  
+Using the model you selected in part d.,forecast what will happen to the size of the Democratic majority in the US House in the 2018, 2020, and 2022 elections for three scenarios. For all three scenarios, assume the Democrats recapture the presidency in 2020 and compute appropriate counterfactual values of PartisanMidterm and Coattails, and set Pre1994 to 0. For unemployment, assume the following three scenarios:  
+1. unemployment stays at 4.6% for all three elections  
+2. unemployment falls to 3.6% for all three elections  
+3. unemployment rises to 5.6% for all three elections  
+
+For each scenario, report or graph the predicted Democratic majority and its 95% confidence (or predictive) interval for the 2018, 2020, and 2022 elections.  
+
+Describe the substantive impact of your forecast results in as much detail as you feel comfortable, as well as how much confidence we should have in the forecasts.  
+
+NB: As a check on your work, for each scenario and year also report the table of counterfactual covariate values you used to make your forecasts. Be very careful when constructing these values to capture to logic of the covariates; each one is tricky in its own way. To carry out the forecasts, you may use either predict() or the simcf library’s ldvsimev().  
+
+
+```{r}
+# obtain E[y|X] and confidence intervals
+get_EYgivenX <- function(model, n_ahead, PartisanMidterm, PartisanUnem, Coattails, Pre1994) {
+    dnew_ <- data.frame(PartisanMidterm = PartisanMidterm,
+                        PartisanUnem = PartisanUnem, 
+                        Coattails = Coattails,
+                        Pre1994 = Pre1994) |> as.matrix()
+    preds <- predict(model, n_ahead, newxreg = dnew_) 
+    conf_int <- data.frame(
+                  period = model$nobs + 1:n_ahead,
+                  mean = preds$pred,
+                  upr = preds$pred + 1.96 * preds$se,
+                  lwr = preds$pred - 1.96 * preds$se
+                )
+    return(conf_int)
+}
+
+# obtain predicted values and predicted intervals
+get_predvals <- function(model, n_sims = 1e4, n_ahead, PartisanMidterm, PartisanUnem, Coattails, Pre1994) {
+    
+    # build new data
+    dnew_ <- data.frame(PartisanMidterm = PartisanMidterm,
+                        PartisanUnem = PartisanUnem, 
+                        Coattails = Coattails,
+                        Pre1994 = Pre1994) |> as.matrix()
+    
+    # simulate draws from MVN given the parameters obtained in my model
+    sim_params <- MASS::mvrnorm(n_sims, model$coef, model$var.coef)
+    sim_outcomes <- matrix(NA, nrow = n_sims, ncol = n_ahead)
+    
+    # for each draw from MVN get the predicted values
+    for (i in 1:n_sims) {
+      model$coef <- sim_params[i, ]
+      sim_outcomes[i, ] <- predict(model, n.ahead = n_ahead, newxreg = as.matrix(dnew_))[["pred"]] 
+    }
+    pred_int <- data.frame(
+      period = model$nobs + 1:n_ahead,
+      mean = colMeans(sim_outcomes),
+      upr = apply(sim_outcomes, 2, quantile, 0.975),
+      lwr = apply(sim_outcomes, 2, quantile, 0.025)
+    )
+    
+    return(pred_int)
+}
+```
+
+```{r}
+PartisanMidterm <- c(-1,0,1) #GOP hoods presidency, 2020 election, (assume) Dems take presidency
+Coattails <- c(0,1,0) # no pres election, (assume) presidency shifts to Dems, no pres election
+mytable <- data.frame(period = integer(),
+                      mean = double(),
+                      upr = double(),
+                      lwr = double(),
+                      PartisanMidterm = integer(),
+                      Coattails = integer(),
+                      Pre1994 = integer(),
+                      PartisanUnem = double(),
+                      model = character())
+
+for(ur in c(4.6, 3.6, 5.6)) {
+  e<-get_EYgivenX(mod_ar0, n_ahead = 3, PartisanMidterm = PartisanMidterm, PartisanUnem = ur, Coattails = Coattails, Pre1994 = 0)
+  p<-get_predvals(mod_ar0, n_ahead = 3, PartisanMidterm = PartisanMidterm, PartisanUnem = ur, Coattails = Coattails, Pre1994 = 0)
+  
+  e <- e |> mutate(PartisanMidterm = PartisanMidterm,
+                   Coattails = Coattails,
+                   Pre1994 = 0,
+                   PartisanUnem = ur,
+                   model = "E(Y|X)")
+  p <- p |> mutate(PartisanMidterm = PartisanMidterm,
+                   Coattails = Coattails,
+                   Pre1994 = 0,
+                   PartisanUnem = ur,
+                   model ="yhat")  
+
+  mytable <- mytable |> dplyr::bind_rows(e, p)
+}
+
+
+```  
+
+```{r}
+# plot expected values and predicted values
+plot_forecast <- function(mytable) {
+    prior_data <- data.frame(
+      period = 1:(length(dem_house_maj)+1),
+      mean = c(dem_house_maj, mytable$mean[1]),
+      upr = c(dem_house_maj, mytable$mean[1]),
+      lwr = c(dem_house_maj, mytable$mean[1])
+    )
+    
+    p1<- ggplot(mytable, aes(x = period, y = mean, ymax = upr, ymin = lwr)) +
+         geom_line() +
+         geom_ribbon(aes(fill = model), alpha = 0.3) +
+         scale_fill_discrete(labels = c("95% prediction interval", "95% confidence interval"), 
+                             name = "") + 
+         geom_line(data = prior_data, mapping = aes(x = period, y = mean)) +
+         labs(x = "Election", y = "Size of Democratic Senate Majority") + 
+         scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25, 30),
+                            labels = c("1963","1971","1981","1991","2001","2011","2021")) +
+         ggtitle(paste0("Democratic Senate Majority under\n", 
+                        mytable[1, "PartisanUnem"], 
+                        " unemployment rate and \n assuming Democratic recapture of presidency in 2020")) + 
+         geom_text(aes(y = ifelse(period==31 & model == "E(Y|X)", mean, NA), 
+                       x = 31, 
+                       label = round(mean, 1), 
+                       vjust = 1.2)) + 
+         geom_text(aes(y = ifelse(period==31 & model == "E(Y|X)", upr, NA), 
+                       x = 31, 
+                       label = round(upr, 1), 
+                       vjust = 0.1),
+                       alpha = 0.5) + 
+         geom_text(aes(y = ifelse(period==31 & model == "E(Y|X)", lwr, NA), 
+                       x = 31, 
+                       label = round(lwr, 1), 
+                       vjust = 0.1),
+                       alpha = 0.5) +        
+         theme(panel.grid = element_blank(),
+               panel.background = element_blank(),
+               legend.position = c(0.15,0.25),
+               plot.title = element_text(hjust = 0.5))
+    p1
+}
+```  
+
+```{r, echo = FALSE}
+plot_forecast(mytable[1:6,])
+```  
+
+*Assuming the unemployment rate remains at 4.6 and assuming the Democrats regain the presidency in 2020 (as they did), my model projects the Democratic majority falling by 21 seats on average. In 10,000 simulations, the loss went as far low as losing 48 seats and as far up as gaining 6 seats. In other words, things are not too optimistic for the Democrats for Senate races in 2023.*  
+*The model projection for the 2021 race, though is not as bad as for 2023. Democrats are expected, according to the model, to gain 4 seats, but under simulations, they could lose up to 23 seats or gain 32 seats.*  
+```{r, echo = FALSE}
+plot_forecast(mytable[7:12,])
+```  
+
+*Assuming the unemployment drops to 3.6 and assuming the Democrats regain the presidency in 2020 (as they did), my model projects the Democratic majority falling by 19 seats on average in 2023. In 10,000 simulations, the loss went as far low as losing 46 seats (compared to 48 under 4.6 unemployment) and as far up as gaining 8 seats (as opposed to 6 under 4.6 unemployment). Even with a one percentage point lower unemployment, Democrats are expected to lose about 19 seats in 2023.*    
+```{r, echo = FALSE}
+plot_forecast(mytable[13:18,])
+```  
+
+*Let's assume an increase in unemployment rate to 5.6, Democrats are expected to lose 23 seats. The 95% confidence interval for this expectation is losing 2 to losing 44 seats. In 10,000 simulations, Democrats lost as many as 51 seats, but gain as many as 4 seats. Such a high unemployment rate will likely make things more difficult for Democrats.*  
+
+
+# Problem 2: Analyzing US Senate seat shares using ARMA  
+
+Since 1963, the US Senate has consisted of 100 elected voting members serving staggered six-year terms. Roughly one-third of the seats in the Senate are up for election in each even-numbered year. As a result, the Senate has three “classes” of seats. For example, the class of 2012 is up for re-election in 2018. Because 2012 was a good year for Democrats (due to Barack Obama’s coattails, among other factors), that means the Democrats have many seats to defend in 2018, putting them at a disadvantage relative to 2016.  
+
+### (a)  
+
+Plot the time series DemSenateMaj and plot its ACF and PACF. Perform augmented Dickey-Fuller and Phillips-Peron tests for unit roots. Now “demean” the data by period, removing the pre-1994 mean from cases before 1994, and the post-1994 mean from cases after 1994. Make new time series, ACF, and PACF plots and compare your results. Diagnosis the time series, accounting for the possibility of a structural break.
+
+```{r P2a}
+dem_senate_maj <- ts(d$DemSenateMaj)
+xlabs <- unique(d$StartYear)
+plot(dem_senate_maj, ylab = "Democratic Senate Majority", xaxt = "n")
+axis(1, at=seq(1, 28, by=5), labels=xlabs[seq(1, 28, by=5)])
+```  
+*It appears that from 1964 to about 1994, the trend of Democratic Senate Majority was downward. Things seem to have stabilized after 1994*  
+
+```{r, echo=FALSE}
+par(mfrow = c(1,2))
+acf(dem_senate_maj, main = "")
+pacf(dem_senate_maj, main = "")
+mtext("Democratic Senate majority from 1963", side = 3, line = -1, outer = TRUE)
+```  
+*The ACF plot suggests an AR(1) process at work. The PACF confirms a statistically significant* $y_{t-1}$ *correlation with* $y_t$ *.*  
+
+```{r, echo=FALSE}
+dft <- adf.test(dem_senate_maj)
+ppt <- pp.test(dem_senate_maj, alternative = "stationary")
+```  
+*Given the Dickey-Fuller test, whose null hypothesis is non-stationarity, (pval = `r round(dft$p.value,3)`) we conclude the time series is non-stationary, which it disagrees with the ACF and PACF because they reported a* $|\phi_1|<1$.  
+*The Phillips-Perron test, on the other hand, suggests this time series is non-stationary (pval = `r round(ppt$p.value, 3)`)*  
+*As with the Dem House Majority time series above, these test are in contradiction with each other.*    
+
+```{r, echo=FALSE}
+y1993 <- which(d$StartYear == 1993)
+y1995 <- which(d$StartYear == 1995)
+pre94mean  <- mean(dem_senate_maj[1:y1993])
+post94mean <- mean(dem_senate_maj[y1995:length(dem_senate_maj)])
+dem_senate_maj_demeaned <- c(dem_senate_maj[1:y1993] - pre94mean, 
+                            dem_senate_maj[y1995:length(dem_senate_maj)]-post94mean) |> ts()
+
+xlabs <- unique(d$StartYear)
+plot(dem_senate_maj_demeaned, ylab = "Democratic House Majority (demeaned)", xaxt = "n")
+axis(1, at = seq(1, 28, by=5), labels = xlabs[seq(1, 28, by=5)])
+abline(v=y1993+1)
+```  
+```{r, echo=FALSE}
+par(mfrow = c(1,2))
+acf(dem_senate_maj_demeaned, main = "")
+pacf(dem_senate_maj_demeaned, main = "")
+mtext("Democratic Senate majority from 1963 (demeaned)", side = 3, line = -1, outer = TRUE)
+```  
+*Demeaning the time series with a pre-1994 and a post-1994 mean does not seem to remove the AR(1) process at work here. This, to me, suggests that 1994 was not the watershed event it was for the House.*  
+
+### (b)  
+
+Repurpose your code from Problem 1 to model the time series <code>DemSenateMaj</code>. In particular, control for <code>PartisanMidterm</code>, <code>PartisanUnem</code>, <code>Coattails</code>, and <code>Pre1994</code>, and consider five models:  
+- an AR(0) model,  
+- an AR(1) model,  
+- an AR(2) model,  
+- an MA(1) model, and  
+- an ARMA(1,1) model.  
+Recreate the two tables you made in Problem 1 (the table of coefficients and the table of goodness of fit statistics) for the Senate data. How do the substantive results compare to the House models?  
+
+```{r, echo=FALSE}
+xcovariates <- cbind(d$PartisanMidterm, d$PartisanUnem, d$Coattails, d$Pre1994)
+
+mod_ar0 <- arima(dem_house_maj, 
+                 order = c(0,0,0), 
+                 xreg = xcovariates,
+                 include.mean = TRUE)
+names <- c("Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- make_table(mod_ar0, names, model_name = "AR(0)")
+
+
+mod_ar1 <- arima(dem_senate_maj, 
+                 order = c(1,0,0), 
+                 xreg = xcovariates,
+                 include.mean = TRUE)
+names_ar1 <-  c("AR(1)","Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- mytable |> full_join(make_table(mod_ar1, names_ar1, "AR(1)"), by = c("Parameters","Type"))
+
+mod_ar2 <- arima(dem_senate_maj, 
+                 order = c(2,0,0), 
+                 xreg = xcovariates,
+                 include.mean = TRUE)
+names_ar2 <-  c("AR(1)","AR(2)","Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- mytable |> full_join(make_table(mod_ar2, names_ar2, "AR(2)"), by = c("Parameters","Type"))
+
+mod_ma1 <- arima(dem_senate_maj, 
+                 order = c(0,0,1), 
+                 xreg = xcovariates,
+                 include.mean = TRUE)
+names_ma1 <-  c("MA(1)","Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- mytable |> full_join(make_table(mod_ma1, names_ma1, "MA(1)"), by = c("Parameters","Type"))
+
+mod_arma1 <- arima(dem_senate_maj, 
+                   order = c(1,0,1), 
+                   xreg = xcovariates,
+                   include.mean = TRUE)
+names_arma1 <-  c("AR(1)","MA(1)",
+                  "Intercept","Partisan Midterm", "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- mytable |> full_join(make_table(mod_arma1, names_arma1, "ARMA(1,1)"), by = c("Parameters","Type"))
+```
+```{r, echo=FALSE}
+pretty_tab <- mytable[,-2] |> 
+              replace_na(replace = list(`AR(0)` = " ", 
+                                        `AR(1)` = " ", 
+                                        `AR(2)` = " ", 
+                                        `MA(1)` = " ", 
+                                        `ARMA(1,1)` = " "))
+knitr::kable(pretty_tab)
+```  
+```{r, echo=FALSE}
+orders <- list(c(0,0,0), c(1,0,0), c(2,0,0), c(0,0,1), c(1,0,1))
+results <- sapply(orders, ts_cv, ts = dem_senate_maj,
+                                 xcovars = xcovariates,
+                                 include_mean = TRUE,
+                                 min_window = 20,
+                                 sliding_trainset = TRUE,
+                                 forward = 3) |> t()
+```
+```{r, echo=FALSE}
+AICs <- pretty_tab[which(pretty_tab$Parameters == "AIC"), 2:6] |> unlist() |> as.vector()
+RMSEs <- pretty_tab[which(pretty_tab$Parameters == "RMSE"), 2:6] |> unlist() |> as.vector()
+
+results_df <- as.data.frame(round(results,1)) |> 
+              dplyr::mutate(models = c("ar(0)","ar(1)","ar(2)","ma(1)","arma(1,1)"),
+                            RMSE = RMSEs, AIC = AICs)
+names(results_df) <- c("MAE p1", "MAE p2", "MAE p3", "models", "RMSE", "AIC")
+
+results_tab_senate <- results_df |> dplyr::select(models, RMSE, AIC, starts_with("MAE"),)
+knitr::kable(results_tab_senate, caption = "Goodness of Fit") 
+```  
+
+*In the Dem Senate Majority time series case, AR(0) is definitely not a good model, based on the above reported goodness of fit statistics. I would actually go with MA(1). MA(1) does well in terms of RMSE and AIC. Now, RMSE and AIC are in-sample measures of fit, but MA(1) does well CV MAE. It is not the greatest performer in each measure, but it is the most consistently good performer.*  
+
+### (c)  
+Now estimate a sixth model: an AR(1)AR(1)$_3$. Add this model to the two tables you made in part b. How well does the new model do? What model is best overall? Can you provide a substantive rationale for using either an MA(1) or an AR(1)AR(1)3 model to model the US Senate, but not the House?  
+
+```{r, echo=FALSE}
+mod_ar1ar1_3 <- arima(dem_senate_maj, 
+                      order = c(1,0,0), 
+                      seasonal = list(order = c(1,0,0), period = 3),
+                      xreg = xcovariates,
+                      include.mean = TRUE)
+names_ar1ar1_3 <-  c("AR(1)","Seasonal A(1)","Intercept","Partisan Midterm", 
+                     "Partisan Unemployment", "Coat Tails", "Pre 1994")
+mytable <- mytable |> full_join(make_table(mod_ar1ar1_3, names_ar1ar1_3, "AR(1)AR(1)_3"), 
+                                by = c("Parameters","Type"))
+```
+```{r, echo=FALSE}
+pretty_tab <- mytable[,-2] |> 
+              replace_na(replace = list(`AR(0)` = " ", 
+                                        `AR(1)` = " ", 
+                                        `AR(2)` = " ", 
+                                        `MA(1)` = " ", 
+                                        `ARMA(1,1)` = " ",
+                                        `AR(1)AR(1)_3` = " "))
+knitr::kable(pretty_tab)
+```  
+
+*Notice that the seasonal coefficient is significant (pval = `r round(0.5/0.18, 2)`) hence there does seem to be seasonality every three elections (or every class election). Let's see how the model does when forecasting in in and out of sample measures*  
+
+```{r, echo=FALSE}
+results_mod6 <- ts_cv(order = c(1,0,1),
+                      seasonal = list(order = c(1,0,0), period = 3),
+                      ts = dem_senate_maj,
+                      xcovars = xcovariates,
+                      include_mean = TRUE,
+                      min_window = 20,
+                      sliding_trainset = TRUE,
+                      forward = 3) |> t()
+
+AIC_m6 <- pretty_tab[which(pretty_tab$Parameters == "AIC"), "AR(1)AR(1)_3"] |> unlist() |> as.vector()
+RMSE_m6 <- pretty_tab[which(pretty_tab$Parameters == "RMSE"), "AR(1)AR(1)_3"] |> unlist() |> as.vector()
+
+mod6_row<-  data_frame(models = "ar(1)ar(1)_3", 
+                       RMSE = RMSE_m6, 
+                       AIC = AIC_m6, 
+                       `MAE p1` = round(results_mod6[1],1),
+                       `MAE p2` = round(results_mod6[2],1),
+                       `MAE p3` = round(results_mod6[3],1))
+
+pretty_tab_m6 <- bind_rows(results_df |> select(models, RMSE, AIC, `MAE p1`, `MAE p2`, `MAE p3`), mod6_row)
+knitr::kable(pretty_tab_m6)
+```  
+*Models 6, which accounts for class seasonality, does not seem to be great at forecasts. The model performed last in terms of CV MAE in p1 and p2, and did pretty badly in CV MAE p3. So, a better fit, as we saw in class, does not necessarily translate to a better forecast.*  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
