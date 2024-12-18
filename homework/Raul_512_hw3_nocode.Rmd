@@ -1,0 +1,990 @@
+---
+title: "Homework 3"
+author: "Raul Torres Aragon"
+date: "5/16/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+library(tidyverse)
+library(simcf)
+library(plm)
+library(nlme)
+library(lmtest)
+library(modeldata)
+library(tidymodels)
+
+full_data <- readr::read_csv("homework/hw3_data.csv")
+```  
+
+# Problem 1:  
+Analyzing partisan seat shares in US state legislatures  
+
+## (a)  
+Preprocess the data to remove unwanted states. Specifically, you should create a new dataframe that removes all states that have a GovCycle other than 1 or a HouseTerm other than 2. Confirm that you now have 28 states and 20 election cycles left in your dataset. Then, create the first four lags of the outcome variable using lagpanel() in the simcf library.  
+
+```{r c1}
+d <- full_data |> filter(!(GovCycle != 1 | HouseTerm != 2))
+
+# confirm we have 28 states
+stopifnot(d$State |> unique() |> length() == 28)
+
+# confirm we have a balanced panel with 20 election cycles
+stopifnot(d |> group_by(State) |> mutate(N = n()) %>% .$N |> unique() == 20)
+
+# creating first 4 lags of outcome
+x <- d |> arrange(State, Year) |> dplyr::select(DemHouseShare)  |> `names<-`(NULL) |> unlist()
+c <- d |> arrange(State, Year) |> dplyr::select(State)          |> `names<-`(NULL) |> unlist()
+t <- d |> arrange(State, Year) |> dplyr::select(Year)           |> `names<-`(NULL) |> unlist()
+
+d <- d |> arrange(State, Year) |> 
+      mutate(DemHouseShare_l1 = lagpanel(x=x, c=c, t=t, lagnum=1) |> as.vector(),
+             DemHouseShare_l2 = lagpanel(x=x, c=c, t=t, lagnum=2) |> as.vector(),
+             DemHouseShare_l3 = lagpanel(x=x, c=c, t=t, lagnum=3) |> as.vector(),
+             DemHouseShare_l4 = lagpanel(x=x, c=c, t=t, lagnum=4) |> as.vector())
+
+rm(list = c("x","c","t"))
+```  
+
+## (b)  
+For each state left in the analysis, plot the time series DemHouseShare and plot its ACF and PACF (there is no need to show these plots; please offer general impressions).  
+
+```{r c2, echo = FALSE}
+d <- d |> mutate(Region = case_when(Northeast == 1 ~ "ne", 
+                                    South == 1 ~ "so",
+                                    Midwest == 1 ~ "mw",
+                                    West == 1 ~ "w"))
+pdata <- pdata.frame(d, index = c("State", "Year")) 
+pdata$DemHouseShare_d1 <- pdata$DemHouseShare - pdata$DemHouseShare_l1
+
+x <- pdata |> arrange(State, Year) |> dplyr::select(DemHouseShare_d1)  |> `names<-`(NULL) |> unlist()
+c <- pdata |> arrange(State, Year) |> dplyr::select(State)             |> `names<-`(NULL) |> unlist()
+t <- pdata |> arrange(State, Year) |> dplyr::select(Year)              |> `names<-`(NULL) |> unlist()
+
+pdata <- pdata |> 
+         arrange(State, Year) |> 
+         mutate(DemHouseShare_d1l1 = lagpanel(x=x, c=c, t=t, lagnum=1) |> as.vector(),
+                DemHouseShare_d1l2 = lagpanel(x=x, c=c, t=t, lagnum=2) |> as.vector())
+```
+
+```{r c3, echo = FALSE}
+ggplot(pdata, aes(x = Year, y = DemHouseShare, group = State, color = Region)) +
+       geom_line(alpha = 0.5) + 
+       ggtitle("Time plots of Democratic House share\n per state from 1979 to 2017") +
+       theme(panel.grid = element_blank(),
+             panel.background = element_blank(),
+             plot.title = element_text(hjust = 0.5)
+             ) + 
+  scale_color_brewer(palette = "Set1")
+```  
+
+```{r c4, echo = FALSE}
+xlabs <- unique(d$Year)
+# I inspected all of them, but just showing 5 random states
+for(s in unique(d$State)[sample(1:length(unique(d$State)), 5)]) {
+  par(mfrow = c(1,2))
+  acf(ts(d$DemHouseShare[d$State == s]), main = "")
+  pacf(ts(d$DemHouseShare[d$State == s]), main = "")
+  mtext(s, outer = TRUE, side = 3, line = -2)
+}  
+```  
+
+
+Perform augmented Dickey-Fuller and Phillips-Peron tests for unit roots for each time series and examine their distribution using histograms.  
+
+```{r c5, warning=FALSE, echo = FALSE}
+states <- unique(d$State)
+adf_tests <- vector(mode = "numeric", length = length(states))
+pp_tests  <- vector(mode = "numeric", length = length(states)) 
+for(i in 1:length(states)) {
+  adf_tests[i] <- tseries::adf.test(ts(d$DemHouseShare[d$State == states[i]]))$p.value
+  pp_tests[i]  <- tseries::pp.test(ts(d$DemHouseShare[d$State == states[i]]))$p.value
+}
+
+par(mfrow = c(2,1)) 
+hist(adf_tests, 
+     breaks = seq(from=0, to=1, by=0.05), 
+     xaxt='n', 
+     main = "Augmented Dickey-Fuller test", xlab = "")
+axis(side=1, at=seq(0, 1, by=0.05), labels=seq(0, 1, by=0.05))
+hist(pp_tests, 
+     breaks = seq(from=0, to=1, by=0.05), 
+     xaxt='n', 
+     main = "Phillips-Perron test", xlab = "p value")
+axis(side=1, at=seq(0, 1, by=0.05), labels=seq(0, 1, by=0.05))
+```  
+
+
+```{r c6, echo = FALSE}
+ts <- data.frame(split(d$DemHouseShare, as.character(d$State))) |> ts()
+int_test <- purtest(ts, pmax = 4, exo = "intercept", test = "ips") 
+tre_test <- purtest(ts, pmax = 4, exo = "trend", test = "ips") 
+```
+```{r c7}
+print(int_test)
+```
+```{r c8}
+print(tre_test)
+```
+*My general impressions are that some states like OK, PA, and TN have a declining trend. Others like IL and CO are trending upward, based on time plots, but these trends don't seem to explode. The series don't spend long spells above their means either. In toher words, I'm not seeing non-stationarity from the time plots.*    
+*My reading of the ACF plots is that there is a lot of geometric decline, but no huge spikes. In other words, each state series seems stationary.*  
+*After inspecting the PACF plots, I did not spot any 2nd or higher correlation. Several states had no significant spikes, and those that did had short spikes on the first order only. This is evidence in favor of AR(1) with $\phi_1$ < 1. I find no evidence of MA() process at work, nor seasonality.*  
+*As the augmented DF and PP test show, very few (MI and TX on ADF and NV, NY and RI in PP) states were considered non-stationary*  
+*The Im-Pesaran-Shin unit-root test fails to reject the null hypothesis  (pval =* `r round(int_test$statistic$p.value,2)`*) of non-stationarity when we declare the individual intercepts as exogenous variables. However, when we declare trend as an exogenous variable, we reject the null of stationarity (pval =* `r round(tre_test$statistic$p.value,2)`*) and conclude the time series are likely non-stationary.*  
+*This, I think, is telling uy that the state intercepts have meaningful information and are thus non-exogenous. In other words, we should probably have different intercepts per state time series.*  
+
+## (c)  
+M1: control for midterm effects, presidential and gubernatorial, unemployment effects, and presidential and gubernatorial coattails.  
+Fit M1 using a model that treats the intercept as a state random effect. To deal with the dynamic nature of the outcome, consider and estimate a variety of ARMA(p,q) specifications. Using the insights gleaned from part b, and goodness of fit tests, select the best model of the time series and call this the "best RE model for M1."  
+
+```{r c9, echo = FALSE}
+make_RE_restable <- function(model, model_name) {
+    
+    aux <- ifelse(str_detect(model_name, ".+\\(1.+"), exp(model$modelStruct$corStruct[1]), NA)
+    
+    coeffs <- as.data.frame(coef(summary(model)) |> round(4)) |> rownames_to_column("Coeff")
+    
+    phi    <- as_tibble_row(list("Coeff" = "phi", 
+                                 "Value" = (aux-1)/(aux+1), 
+                                 "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))
+    
+    loglik <- as_tibble_row(list("Coeff" = "LogLikelihood", 
+                                 "Value" = model$logLik, 
+                                 "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))
+    
+    aic <- as_tibble_row(list("Coeff" = "AIC", 
+                              "Value" = AIC(model), 
+                              "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))
+    
+    N   <- as_tibble_row(list("Coeff" = "N", 
+                              "Value" = model$dims$N, 
+                              "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))
+    
+    t   <- as_tibble_row(list("Coeff" = "t", 
+                              "Value" = model$dims$N / model$dims$ngrps[[1]], 
+                              "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))    
+    
+    n   <- as_tibble_row(list("Coeff" = "n", 
+                              "Value" = model$dims$ngrps[[1]], 
+                              "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))    
+    results <- coeffs |> 
+      bind_rows(phi,loglik,aic, n, t, N) |> 
+      dplyr::select(Coeff, Value, Std.Error) |> 
+      pivot_longer(c(Value, Std.Error), names_to = "Type", values_to = "Values") |>
+      mutate(Value = case_when(Type == "Std.Error" ~ paste0("(", round(Values,4), ")"),
+                               TRUE ~ as.character(round(Values, 4)))) |> 
+      filter(Value != "(NA)") |>
+      dplyr::select(Coeff, Type, Value) %>% `colnames<-`(c("Coeff", "type", model_name))
+    results
+}
+```  
+
+```{r c9b}  
+# MODEL 1 Random Effects with ARIMA(1, 0, 0)
+m1re_arima100 <- lme(fixed = DemHouseShare ~ PartisanMidterm + PresUnem + GovUnem + PresCoattails + GovCoattails,
+                     random = ~ 1 | State,
+                     correlation = corARMA(
+                       form = ~ Year | State,
+                       p = 1,
+                       q = 0
+                     ),
+                     data = pdata |> mutate(Year = as.integer(Year)),
+                     na.action = na.omit)
+
+# MODEL 1 Random Effects with ARIMA(0, 1, 0)
+m1re_arima010 <- lme(fixed = DemHouseShare_d1 ~ PartisanMidterm + PresUnem + GovUnem + PresCoattails + GovCoattails,
+                     random = ~ 1 | State,
+                     #correlation = corARMA(
+                     #  form = ~ Year | State,
+                     #  p = 0,
+                     #  q = 0
+                     #),
+                     data = pdata |> mutate(Year = as.integer(Year)),
+                     na.action = na.omit)
+
+
+# MODEL 1 Random Effects with ARIMA(1, 1, 0)
+m1re_arima110 <- lme(fixed = DemHouseShare_d1 ~ PartisanMidterm + PresUnem + GovUnem + PresCoattails + GovCoattails,
+                    random = ~ 1 | State,
+                    correlation = corARMA(
+                      form = ~ Year | State,
+                      p = 1,
+                      q = 0
+                    ),
+                    data = pdata |> mutate(Year = as.integer(Year)),
+                    na.action = na.omit)
+
+m1re_arima100_results <- make_RE_restable(m1re_arima100, "M1 RE ARIMA(1,0,0)")
+m1re_arima010_results <- make_RE_restable(m1re_arima010, "M1 RE ARIMA(0,1,0)")
+m1re_arima110_results <- make_RE_restable(m1re_arima110, "M1 RE ARIMA(1,1,0)")
+
+```  
+
+```{r c10, echo = FALSE}
+tabC <- m1re_arima110_results |> 
+            left_join(m1re_arima010_results, by = c("Coeff", "type")) |>
+            left_join(m1re_arima100_results, by = c("Coeff", "type")) |> dplyr::select(-type)
+tabC$Coeff[seq(from = 2, to = 11, by = 2)] <- ""
+knitr::kable(tabC)
+```  
+
+*Based on the loglikelihood, the AIC, and on the fact that the PACF and ACF plots only found evidence for AR(1) process, I would go with ARIMA(1,0,0). This model has the lowest AIC and the highest LL. AS the $\phi$ pvalue suggests, the AR(1) process is very much present. No other coefficient seems to be as influential in explaining variation.*
+
+## (d)  
+Fit M2 using a model that treats the intercept as a state random effect. To deal with the dynamic nature of the outcome, consider and estimate a variety of ARMA(p,q) specifications. Using the insights gleaned from part b. and goodness of fit tests, select the best model of the time series and call this the
+"best RE model for M2."  
+
+```{r c11, echo = FALSE}
+# MODEL 2 Random Effects with ARIMA(1, 0, 0)
+pdata$trend <- pdata$Year
+
+m2re_arima100 <- lme(fixed = DemHouseShare ~ PartisanMidterm + PresUnem + GovUnem + PresCoattails + GovCoattails +
+                             trend:South + trend:Midwest + trend:West + 
+                             South + Midwest + West,
+                   random = ~ 1 | State,
+                   correlation = corARMA(
+                     form = ~ Year | State,
+                     p = 1,
+                     q = 0
+                   ),
+                   data = pdata |> mutate(Year = as.integer(Year)),
+                   na.action = na.omit)
+
+# MODEL 2 Random Effects with ARIMA(0, 1, 0)
+m2re_arima010 <- lme(fixed = DemHouseShare_d1 ~ PartisanMidterm + PresUnem + GovUnem + PresCoattails + GovCoattails + 
+                             trend:South + trend:Midwest + trend:West  + 
+                             South + Midwest + West ,
+                    random = ~ 1 | State,
+                    #correlation = corARMA(
+                    #  form = ~ Year | State,
+                    #  p = 0,
+                    #  q = 0
+                    #),
+                    data = pdata |> mutate(Year = as.integer(Year)),
+                    na.action = na.omit)
+
+# MODEL 2 Random Effects with ARIMA(1, 1, 0)
+m2re_arima110 <- lme(fixed = DemHouseShare_d1 ~ PresUnem + GovUnem + PresCoattails + GovCoattails + 
+                             trend:South + trend:Midwest + trend:West + 
+                             South + Midwest + West,
+                     random = ~ 1 | State,
+                     correlation = corARMA(
+                       form = ~ Year | State,
+                       p = 1,
+                       q = 0
+                     ),
+                     data = pdata |> mutate(Year = as.integer(Year)),
+                     na.action = na.omit)
+
+m2re_arima100_results <- make_RE_restable(m2re_arima100, "M2 RE ARIMA(1,0,0)")
+m2re_arima010_results <- make_RE_restable(m2re_arima010, "M2 RE ARIMA(0,1,0)")
+m2re_arima110_results <- make_RE_restable(m2re_arima110, "M2 RE ARIMA(1,1,0)")
+```  
+
+```{r c12, echo = FALSE}
+tabD <- m2re_arima110_results |> 
+            left_join(m2re_arima010_results, by = c("Coeff", "type")) |>
+            left_join(m2re_arima100_results, by = c("Coeff", "type")) |> dplyr::select(-type)
+tabD$Coeff[seq(from = 2, to = 16, by = 2)] <- ""
+knitr::kable(tabD[!str_detect(tabD$Coeff, "^trend"), ])
+```  
+
+*AS with M1, based on the fact that the PACF and ACF plots only found evidence for AR(1) process, I would go with ARIMA(1,0,0), which achieves the lowest AIC and the highest LL. Once again the $\phi$ coefficient is the "most" significant and with the highest magnitude (one 10% increase in Dem Share the previous year is associated with a 7.1 percentage point (not percent) increase in Dem Share. So, if Dem House share increased 10% in the previous year and it was at 50%, this means that it could be expected to increase to 57.1% holding other things constant.*      
+
+## (e)  
+Fit M1 using a model that treats the intercept as a state fixed effect. To deal with the dynamic nature of the outcome, consider controlling for one or more lags of the outcome variable. Using the insights gleaned from part b., goodness of fit tests, and tests of serial correlation, select the best model of the time series and call this the “best FE model for M1.”  
+
+```{r c13, echo = FALSE}
+make_FE_restable <- function(model, model_name) {
+    
+    its <- model$model |> rownames_to_column("it") |> dplyr::select(it)
+    
+    coeffs <- as.data.frame(coeftest(model, vocv. = vcovHC(model, method = "arellano"))[] |> 
+              round(4)) |> rownames_to_column("Coeff") |>
+              `colnames<-`(c("Coeff","Estimate","Std.Error","t-value","p-value"))
+    
+    phi_1 <- as_tibble_row(list("Coeff" = "phi BG test (pval)",
+                                "Estimate" = ifelse(str_detect(model_name, ".+ARIMA.1....."), 
+                                                     round(pbgtest(model)$p.value, 4), 
+                                                     NA),
+                                "Std.Error" = NA, 
+                                "DF" = NA, "t-value" = NA, "p-value" = NA))
+    r2_adj <- as_tibble_row(list("Coeff" = "r2_adj", 
+                                 "Estimate" = r.squared(model, dfcor = TRUE), 
+                                 "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))
+    n   <- as_tibble_row(list("Coeff" = "n", 
+                              "Estimate" = nrow(its), 
+                              "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))
+    t   <- as_tibble_row(list("Coeff" = "t", 
+                              "Estimate" = str_sub(its$it,4,-1) |> unique() |> length(), 
+                              "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))  
+    N   <- as_tibble_row(list("Coeff" = "N", 
+                              "Estimate" = nrow(its), 
+                              "Std.Error" = NA, "DF" = NA, "t-value" = NA, "p-value" = NA))
+    
+    results <- coeffs |> 
+      bind_rows(phi_1,r2_adj, n, t, N) |> 
+      dplyr::select(Coeff, Estimate, Std.Error) |> 
+      pivot_longer(c(Estimate, Std.Error), names_to = "Type", values_to = "Values") |>
+      mutate(Value = case_when(Type == "Std.Error" ~ paste0("(", round(Values,4), ")"),
+                               TRUE ~ as.character(round(Values, 4)))) |> 
+      filter(Value != "(NA)") |>
+      dplyr::select(Coeff, Type, Value) %>% `colnames<-`(c("Coeff", "type", model_name))
+    results
+}
+
+```
+
+
+```{r c14, echo = FALSE}  
+# MODEL 1 Fixed Effects with ARIMA(1, 0, 0)
+m1fe_arima100 <-plm(formula = DemHouseShare ~ DemHouseShare_l1 + PartisanMidterm + 
+                         PresUnem + GovUnem + PresCoattails + GovCoattails, 
+                    data = pdata,
+                    model = "within",
+                    effect = "individual")
+
+# MODEL 1 Fixed Effects with ARIMA(0, 1, 0)
+m1fe_arima010 <-plm(formula = DemHouseShare_d1 ~ PartisanMidterm + 
+                              PresUnem + GovUnem + PresCoattails + GovCoattails, 
+                    data = pdata,
+                    model = "within",
+                    effect = "individual")
+
+# MODEL 1 Fixed Effects with ARIMA(1, 1, 0)
+m1fe_arima110 <-plm(formula = DemHouseShare_d1 ~ DemHouseShare_d1l1 + PartisanMidterm + 
+                              PresUnem + GovUnem + PresCoattails + GovCoattails, 
+                    data = pdata,
+                    model = "within",
+                    effect = "individual")
+
+m1_fe_res1 <- make_FE_restable(m1fe_arima100, "M1 FE ARIMA(1,0,0)")
+m1_fe_res2 <- make_FE_restable(m1fe_arima010, "M1 FE ARIMA(0,1,0)")
+m1_fe_res3 <- make_FE_restable(m1fe_arima110, "M1 FE ARIMA(1,1,0)")
+
+```  
+
+```{r c15, echo = FALSE}
+tabE <- m1_fe_res3 |> 
+            left_join(m1_fe_res2, by = c("Coeff", "type")) |>
+            left_join(m1_fe_res1, by = c("Coeff", "type")) |> dplyr::select(-type)
+tabE$Coeff[seq(from = 2, to = 13, by = 2)] <- ""
+knitr::kable(tabE)
+```  
+
+*Based on adjusted R squared, ARIMA(1,0,0) seems to be the better fit. It also models what we found in the PACF and ACF plots above (an AR(1)  with $\phi_1<1$. Only significant influence is in the lagged Democratic House share, which all models (that fit one) found it significant.*  
+
+```{r c16, echo = FALSE}  
+# MODEL 2 Fixed Effects with ARIMA(1, 0, 0)
+m2fe_arima100 <-plm(formula = DemHouseShare ~ DemHouseShare_l1 + PartisanMidterm + 
+                              PresUnem + GovUnem + PresCoattails + GovCoattails + 
+                              trend:South + trend:Midwest + trend:West + trend:Northeast -1, 
+                    data = pdata,
+                    model = "within",
+                    effect = "individual")
+
+# MODEL 2 Fixed Effects with ARIMA(0, 1, 0)
+m2fe_arima010 <-plm(formula = DemHouseShare_d1 ~ PartisanMidterm + 
+                              PresUnem + GovUnem + PresCoattails + GovCoattails + 
+                              trend:South + trend:Midwest + trend:West + trend:Northeast -1, 
+                    data = pdata,
+                    model = "within",
+                    effect = "individual")
+
+# MODEL 2 Fixed Effects with ARIMA(1, 1, 0)
+m2fe_arima110 <-plm(formula = DemHouseShare_d1 ~ DemHouseShare_d1l1 + PartisanMidterm + 
+                              PresUnem + GovUnem + PresCoattails + GovCoattails + 
+                              trend:South + trend:Midwest + trend:West + trend:Northeast -1, 
+                    data = pdata,
+                    model = "within",
+                    effect = "individual")
+
+m2_fe_res1 <- make_FE_restable(m2fe_arima100, "M2 FE ARIMA(1,0,0)")
+m2_fe_res2 <- make_FE_restable(m2fe_arima010, "M2 FE ARIMA(0,1,0)")
+m2_fe_res3 <- make_FE_restable(m2fe_arima110, "M2 FE ARIMA(1,1,0)")
+
+```  
+
+```{r c17, echo = FALSE}
+tabF <- m2_fe_res3 |> 
+            left_join(m2_fe_res2, by = c("Coeff", "type")) |>
+            left_join(m2_fe_res1, by = c("Coeff", "type")) |> dplyr::select(-type)
+tabF$Coeff[seq(from = 2, to = 13, by = 2)] <- ""
+knitr::kable(tabF[!str_detect(tabF$Coeff, "^trend"), ])
+```  
+
+*Across the board O keep finding ARIMA(1,0,0) models being the best fit. For these Fixed Effects models, ARIMA(1,0,0) achieved the best fit in terms of adjusted $R^2$. The most significant influence seems to be the previous share of seats, significant across models. Negligible or statistically insignificant results for all other coefficients.*   
+
+## (g)  
+Using each of four “best” models, forecast what will happen to the size of the Democratic majority in the average state in the 2019 and 2021 sessions for the following single scenario:  
+- Assume the Democrats resume this state’s governorship in 2019 and the presidency in 2021  
+- Compute appropriate counterfactual values of PartisanMidterm, PresCoattails, GovCoattails.  
+- Assume unemployment falls to 3.6% for both elections and construct PresUnem and GovUnem accordingly.  
+- Set all trend variables at the average value they will take across regions in 2019 and 2021, respectively.  
+- Make appropriate assumptions for the prior value(s) of the outcome variable (e.g., the average Democratic House share in 2017).
+
+
+```{r c18, warning=FALSE, echo = FALSE}
+
+# number of periods to forecast
+# -----------------------------
+periods_out <- 2
+
+
+# best model formulas
+# -------------------
+m1re_formula <- as.formula("DemHouseShare ~ PartisanMidterm + PresUnem + GovUnem + PresCoattails + GovCoattails")
+
+m2re_formula <- as.formula("DemHouseShare ~ PartisanMidterm + PresUnem + GovUnem + PresCoattails + GovCoattails +
+                            trend:South + trend:Midwest + trend:West + 
+                            South + Midwest + West")
+
+m1fe_formula <- as.formula("DemHouseShare ~ DemHouseShare_l1 + PartisanMidterm + 
+                            PresUnem + GovUnem + PresCoattails + GovCoattails")
+
+m2fe_formula <- as.formula("DemHouseShare ~ DemHouseShare_l1 + PartisanMidterm + 
+                            PresUnem + GovUnem + PresCoattails + GovCoattails + 
+                            trend:South + trend:Midwest + trend:West + trend:Northeast -1")
+
+# simulating K draws from MVN(mean = coefficients from model, var = varcovar matrix from models)
+# ----------------------------------------------------------------------------------------------
+k <- 1000
+m1re_mvn_draws <- MASS::mvrnorm(k, unlist(coefficients(m1re_arima100)[1,]), vcov(m1re_arima100))
+m2re_mvn_draws <- MASS::mvrnorm(k, unlist(coefficients(m2re_arima100)[1,]), vcov(m2re_arima100))
+m1fe_mvn_draws <- MASS::mvrnorm(k, coefficients(m1fe_arima100), vcovHC(m1fe_arima100, method = "arellano"))
+m2fe_mvn_draws <- MASS::mvrnorm(k, coefficients(m2fe_arima100), vcovHC(m2fe_arima100, method = "arellano"))
+
+
+
+
+# initial level of DemHouseShare
+# ------------------------------
+# mean of last period in data (2017) across all states
+DemHouseShare_initial <- mean(pdata$DemHouseShare[pdata$Year == 2017])
+
+
+# lag of DemHouseShare
+# --------------------
+# for models that use it explicitly
+lag_DemHouseShare <- mean(pdata$DemHouseShare_l1[pdata$Year == "2017"])
+
+
+# get phi's from models that add an AR(1) term
+# --------------------------------------------
+get_phi <- function(model) {
+    aux <- model$modelStruct$corStruct[1] |> exp()  
+    phi <- (aux-1)/(aux+1)
+    phi
+}
+m1re_phi <- get_phi(m1re_arima100); m1re_beta <- m1re_mvn_draws;
+m2re_phi <- get_phi(m2re_arima100); m2re_beta <- m2re_mvn_draws;
+m1fe_phi <- m1fe_mvn_draws[, 1, drop = FALSE]; m1fe_beta <- m1fe_mvn_draws[, 2:ncol(m1fe_mvn_draws)];
+m2fe_phi <- m2fe_mvn_draws[, 1, drop = FALSE]; m2fe_beta <- m2fe_mvn_draws[, 2:ncol(m2fe_mvn_draws)];
+colnames(m2re_beta) <- str_replace(colnames(m2re_beta), ":", "__")
+colnames(m2fe_beta) <- str_replace(colnames(m2fe_beta), ":", "__")
+
+
+# Setting up hypothetical 2019 and 2021 covariate values for each of the models
+# -----------------------------------------------------------------------------
+
+# make interactions
+ints <- recipe(DemHouseShare ~ ., data = pdata) %>% 
+          step_interact(terms = ~ trend:South + trend:Midwest + trend:West + trend:Northeast -1, sep = "__") %>% 
+          prep(training = pdata) %>% 
+          bake(pdata) %>%
+          dplyr::select(starts_with("trend")) %>%
+          dplyr::select(-trend)
+ints_noNorth <- names(ints)[!str_detect(names(ints), ".+N+.")]
+
+pdata_noints <- pdata
+pdata <- cbind(pdata, ints)
+
+# update formulas to include explicit trend:Region interactions and remove LDV (for FE)
+# [NOTE: cfMake for plam() FE models do not expect the LDV in the formula]
+m1fe_formula <- update(m1fe_formula, "~ . -DemHouseShare_l1")
+
+int_names <- colnames(m2fe_beta)[str_detect(colnames(m2fe_beta), "^trend.+")]
+m2fe_formula <- update(m1fe_formula, paste(c("~ .",int_names), collapse = "+")) |>
+                update("~ . -DemHouseShare_l1")
+
+m2re_formula <- update(m1re_formula, paste(c("~ .", ints_noNorth), collapse = "+")) |> 
+                update(paste(c("~ .", c("South","Midwest","West")), collapse = "+"))
+
+cf_df_m1re <- cfMake(formula = m1re_formula, data = pdata, nscen = periods_out)
+cf_df_m2re <- cfMake(formula = m2re_formula, data = pdata, nscen = periods_out) 
+cf_df_m1fe <- cfMake(formula = m1fe_formula, data = pdata, nscen = periods_out)
+cf_df_m2fe <- cfMake(formula = m2fe_formula, data = pdata, nscen = periods_out) 
+```
+
+```{r , echo = FALSE}
+
+# Modify the hypothetical scenario based on our hypothetical values
+# (cfMake assumed means for all covariates; we'll leave that as our baseline)
+
+# PartisanMidterm
+# ---------------
+# in 2019 there was no presidential election, 
+# so PartisanMidterm = -1 for all states since GOP was in power
+cf_df_m1re <- cfChange(cf_df_m1re, "PartisanMidterm", x=-1, scen=1)
+cf_df_m2re <- cfChange(cf_df_m2re, "PartisanMidterm", x=-1, scen=1)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "PartisanMidterm", x=-1, scen=1)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "PartisanMidterm", x=-1, scen=1)
+
+# we assume DEM takes presidency in 2021, 
+# so PartisanMidterm = 1 for all states in 2021
+cf_df_m1re <- cfChange(cf_df_m1re, "PartisanMidterm", x=1, scen=2)
+cf_df_m2re <- cfChange(cf_df_m2re, "PartisanMidterm", x=1, scen=2)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "PartisanMidterm", x=1, scen=2)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "PartisanMidterm", x=1, scen=2)
+
+
+# PresCoattails
+# -------------
+# in 2019 there was no presidential election,
+# so there was no shift of party in power
+cf_df_m1re <- cfChange(cf_df_m1re, "PresCoattails", x=0, scen=1)
+cf_df_m2re <- cfChange(cf_df_m2re, "PresCoattails", x=0, scen=1)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "PresCoattails", x=0, scen=1)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "PresCoattails", x=0, scen=1)
+
+# we assume DEM takes presidency in 2021, 
+# so PresCoattails = 1 for all states in 2021
+cf_df_m1re <- cfChange(cf_df_m1re, "PresCoattails", x=1, scen=2)
+cf_df_m2re <- cfChange(cf_df_m2re, "PresCoattails", x=1, scen=2)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "PresCoattails", x=1, scen=2)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "PresCoattails", x=1, scen=2)
+
+
+# PresUnem
+# --------
+# We assume unemployment rate is 3.6% in both 2019 
+# since GOP was in power in 2019, PresUnem = -1*abs(5.97-3.6)
+cf_df_m1re <- cfChange(cf_df_m1re, "PresUnem", x=-1*abs(5.97-3.6), scen=1)
+cf_df_m2re <- cfChange(cf_df_m2re, "PresUnem", x=-1*abs(5.97-3.6), scen=1)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "PresUnem", x=-1*abs(5.97-3.6), scen=1)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "PresUnem", x=-1*abs(5.97-3.6), scen=1)
+
+# We assume unemployment rate is 3.6% in both 2021 
+# since we assume DEM took presidenc in 20021, PresUnem = +1*abs(5.97-3.6)
+cf_df_m1re <- cfChange(cf_df_m1re, "PresUnem", x=1*abs(5.97-3.6), scen=2)
+cf_df_m2re <- cfChange(cf_df_m2re, "PresUnem", x=1*abs(5.97-3.6), scen=2)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "PresUnem", x=1*abs(5.97-3.6), scen=2)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "PresUnem", x=1*abs(5.97-3.6), scen=2)
+
+
+# GovCoattails
+# ------------
+# We assume 2019 DEM takes gubernatorial power, 
+# and since all of our 28 states hold elections in 2019, 
+# GovCoattails = 1 for states that had a GOP governor
+# GovCoattails = 0 for states that had a DEM governor
+
+x <- pdata |> 
+       filter(GovCoattails != 0) |> 
+       group_by(State) |> 
+       mutate(max_year = max(as.integer(Year))) |> 
+       filter(max_year == as.integer(Year)) |> 
+       dplyr::select(State, Year, GovCoattails) |> as.data.frame()
+gop <- x$GovCoattails == -1
+dem <- x$GovCoattails ==  1
+
+states_gov_gop <- unique(x[gop,]$State)
+states_gov_dem <- unique(x[dem,]$State)
+stopifnot(length(c(states_gov_gop, states_gov_dem)) == length(unique(pdata$State)))
+
+pdata$GovCoattails[pdata$Year == 2019 & pdata$State %in% states_gov_gop] <- 1
+pdata$GovCoattails[pdata$Year == 2019 & pdata$State %in% states_gov_dem] <- 0
+# so we see that our average state had a GOP governor (20/28 states were GOP)
+# hence, GovCoattails in 2019 should be 1 "shifted to DEM" per our hypothetical
+rm(x)
+cf_df_m1re <- cfChange(cf_df_m1re, "GovCoattails", x=1, scen=1)
+cf_df_m2re <- cfChange(cf_df_m2re, "GovCoattails", x=1, scen=1)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "GovCoattails", x=1, scen=1)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "GovCoattails", x=1, scen=1)
+
+# in 2021 there are no gubernatorial elections, and since 
+# we assume governor is DEM, GovCoattails = 0
+cf_df_m1re <- cfChange(cf_df_m1re, "GovCoattails", x=0, scen=2)
+cf_df_m2re <- cfChange(cf_df_m2re, "GovCoattails", x=0, scen=2)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "GovCoattails", x=0, scen=2)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "GovCoattails", x=0, scen=2)
+
+
+# GovUnem
+# -------
+# Since we assume DEM governor in 2019, 
+# GovUnem = +1 * abs(5.97-3.6)
+cf_df_m1re <- cfChange(cf_df_m1re, "GovUnem", x=1*abs(5.97-3.6), scen=1)
+cf_df_m2re <- cfChange(cf_df_m2re, "GovUnem", x=1*abs(5.97-3.6), scen=1)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "GovUnem", x=1*abs(5.97-3.6), scen=1)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "GovUnem", x=1*abs(5.97-3.6), scen=1)
+
+# No gubernatorial elections in 2021, so things remain the same
+cf_df_m1re <- cfChange(cf_df_m1re, "GovUnem", x=1*abs(5.97-3.6), scen=2)
+cf_df_m2re <- cfChange(cf_df_m2re, "GovUnem", x=1*abs(5.97-3.6), scen=2)
+cf_df_m1fe <- cfChange(cf_df_m1fe, "GovUnem", x=1*abs(5.97-3.6), scen=2)
+cf_df_m2fe <- cfChange(cf_df_m2fe, "GovUnem", x=1*abs(5.97-3.6), scen=2)
+
+
+# [ only for model2 FE and RE ]
+# trend:Midwest, trend:Northeast, ... trend:West
+# ----------------------------------------------
+# here we take the mean(Midwest)*2019 because
+# out "average state" is "average Midwestern", 
+# same for all other regions
+
+for(s in c("Midwest","Northeast","South","West")) {
+  # 2019
+  if(s %in% names(cf_df_m2re$x)) { 
+  cf_df_m2re <- cfChange(cf_df_m2re, s, x=mean(pdata[[s]]), scen=1) }
+  cf_df_m2fe <- cfChange(cf_df_m2fe, s, x=mean(pdata[[s]]), scen=1)
+  
+  # 2021
+  if(s %in% names(cf_df_m2re$x)) { 
+  cf_df_m2re <- cfChange(cf_df_m2re, s, x=mean(pdata[[s]]), scen=2) }
+  cf_df_m2fe <- cfChange(cf_df_m2fe, s, x=mean(pdata[[s]]), scen=2)
+}
+
+```  
+
+```{r c19}
+
+
+# get predicted values from each model given our hypothetical and baseline datasets
+
+yhat_m1re <- ldvsimev(cf_df_m1re,         # The matrix of hypothetical x's
+                      m1re_beta,          # The matrix of simulated betas
+                      ci=0.95,            # Desired confidence interval
+                     #constant=NA,        # NA indicates no constant!
+                      phi=m1re_phi,       # estimated AR parameters; length must match lagY 
+                     #lagY=lagY_1a,       # lags of y, most recent last
+                      initialY=DemHouseShare_initial # for differenced models, the lag of the level of y
+                      )
+
+yhat_m2re <- ldvsimev(cf_df_m2re,         # The matrix of hypothetical x's
+                      m2re_beta,          # The matrix of simulated betas
+                      ci=0.95,            # Desired confidence interval
+                      phi=m2re_phi,       # estimated AR parameters; length must match lagY 
+                      initialY=DemHouseShare_initial # for differenced models, the lag of the level of y
+                      )
+
+# within FE models, get their intercept differenced away. However, for prediction for a specific State
+# (or for an 'average' State) we have to add it back to the matrix of simulated betas:
+
+const_m1fe <- fixef(m1fe_arima100) |> mean() # mean because we want the "average state"
+
+yhat_m1fe <- ldvsimev(cf_df_m1fe,                    # The matrix of hypothetical x's
+                      cbind(const_m1fe,m1fe_beta),   # The matrix of simulated betas
+                      ci=0.95,                       # Desired confidence interval
+                      #constant=NA,                  # NA indicates no constant!
+                      phi=m1fe_phi,                  # estimated AR parameters; length must match lagY 
+                      lagY=lag_DemHouseShare,        # lags of y, most recent last
+                      initialY=DemHouseShare_initial # for differenced models, the lag of the level of y
+                      )
+
+const_m2fe <- fixef(m2fe_arima100) |> mean()
+
+yhat_m2fe <- ldvsimev(cf_df_m2fe,                    # The matrix of hypothetical x's
+                      cbind(const_m2fe, m2fe_beta),  # The matrix of simulated betas
+                      ci=0.95,                       # Desired confidence interval
+                     #constant=NA,                   # NA indicates no constant!
+                      phi=m2fe_phi,                  # estimated AR parameters; length must match lagY 
+                      lagY=lag_DemHouseShare,        # lags of y, most recent last
+                      initialY=DemHouseShare_initial # for differenced models, the lag of the level of y
+                      )
+
+
+```  
+
+
+```{r c20, echo = FALSE}  
+t <- rep(c(2019,2021),4)
+models <- c("m1 RE AR(1)", "m1 RE AR(1)", "m2 RE AR(1)", "m2 RE AR(1)", 
+            "m1 FE AR(1)", "m1 FE AR(1)", "m2 FE AR(1)", "m2 FE AR(1)")
+yhats <- c(yhat_m1re$pe |> as.vector(),
+           yhat_m2re$pe |> as.vector(),
+           yhat_m1fe$pe |> as.vector(),
+           yhat_m2fe$pe |> as.vector())
+lower <- c(yhat_m1re$lower |> as.vector(),
+           yhat_m2re$lower |> as.vector(),
+           yhat_m1fe$lower |> as.vector(),
+           yhat_m2fe$lower |> as.vector())
+upper <- c(yhat_m1re$upper |> as.vector(),
+           yhat_m2re$upper |> as.vector(),
+           yhat_m1fe$upper |> as.vector(),
+           yhat_m2fe$upper |> as.vector())
+se <- c(yhat_m1re$se |> as.vector(),
+        yhat_m2re$se |> as.vector(),
+        yhat_m1fe$se |> as.vector(),
+        yhat_m2fe$se |> as.vector())
+
+res_table <- tibble(models = models, t = t, lower = lower, yhats = yhats, upper = upper, se = se)
+
+```  
+
+```{r c21, echo=FALSE}
+ library(tile)
+ col <- RColorBrewer::brewer.pal(4,"Dark2")
+ periods <- 1:2
+ initialY <- DemHouseShare_initial
+ M1RE = yhat_m1re; M2RE = yhat_m2re; M1FE = yhat_m1fe; M2FE = yhat_m2fe;
+  
+ M1REtrace <- lineplot(x=c(0, periods),
+                      y=c(initialY, M1RE$pe),
+                      lower=c(initialY, M1RE$lower),
+                      upper=c(initialY, M1RE$upper),
+                      col=col[1],
+                      plot=1)
+
+ M2REtrace <- lineplot(x=c(0, periods),
+                        y=c(initialY, M2RE$pe),
+                        lower=c(initialY, M2RE$lower),
+                        upper=c(initialY, M2RE$upper),
+                        col=col[1],
+                        plot=1)
+ 
+ M1FEtrace <- lineplot(x=c(0, periods),
+                      y=c(initialY, M1FE$pe),
+                      lower=c(initialY, M1FE$lower),
+                      upper=c(initialY, M1FE$upper),
+                      col=col[3],
+                      plot=2)
+
+ M2FEtrace <- lineplot(x=c(0, periods),
+                      y=c(initialY, M2FE$pe),
+                      lower=c(initialY, M2FE$lower),
+                      upper=c(initialY, M2FE$upper),
+                      col=col[4],
+                      plot=3)
+
+# Graph expected values, baseline, and first diffs for all 8 models using tile...
+DemHouseShareLineplots <- function(BASE = NA, M1RE, M2RE, M1FE, M2FE, 
+                                   limitsM1RE, limitsM2RE, limitsM1FE, limitsM2FE,
+                                   initialY, main, file) {
+  
+  # Get 3 nice colors for traces
+  require(RColorBrewer)
+  col <- brewer.pal(4,"Dark2")
+  periods <- 1:2
+  
+  # Set up lineplot trace of M1RE packpc
+  M1REtrace <- lineplot(x=c(0, periods),
+                      y=c(initialY, M1RE$pe),
+                      lower=c(initialY, M1RE$lower),
+                      upper=c(initialY, M1RE$upper),
+                      col=col[1],
+                      plot=1)
+  
+  M1REptrace <- pointsTile(x=c(0, periods),
+                         y=c(initialY, M1RE$pe),
+                         pch=16,
+                         col=col[1],
+                         plot=1)
+  
+  ### BASEtrace <- lineplot(x=c(0, periods),
+  ###                       y=c(initialY, BASE$pe),
+  ###                       lower=c(initialY, BASE$lower),
+  ###                       upper=c(initialY, BASE$upper),
+  ###                       ci=list(mark="dashed"),
+  ###                       col=col[2],
+  ###                       plot=1)
+  ### 
+  ### BASEptrace <- pointsTile(x=c(0, periods),
+  ###                          y=c(initialY, BASE$pe),
+  ###                          pch=16,
+  ###                          col=col[2],
+  ###                          plot=1)
+  
+  M2REtrace <- lineplot(x=c(0, periods),
+                        y=c(initialY, M2RE$pe),
+                        lower=c(initialY, M2RE$lower),
+                        upper=c(initialY, M2RE$upper),
+                        col=col[1],
+                        plot=1)
+  
+  M2REptrace <- pointsTile(x=c(0, periods),
+                           y=c(initialY, M2RE$pe),
+                           pch=16,
+                           col=col[1],
+                           plot=1)
+  
+  
+  M1FEtrace <- lineplot(x=c(0, periods),
+                      y=c(initialY, M1FE$pe),
+                      lower=c(initialY, M1FE$lower),
+                      upper=c(initialY, M1FE$upper),
+                      col=col[3],
+                      plot=2)
+  
+  M1FEptrace <- pointsTile(x=c(initialY, periods),
+                         y=c(initialY, M1FE$pe),
+                         pch=16,
+                         col=col[3],
+                         plot=2)
+  
+  M2FEtrace <- lineplot(x=c(0, periods),
+                      y=c(initialY, M2FE$pe),
+                      lower=c(initialY, M2FE$lower),
+                      upper=c(initialY, M2FE$upper),
+                      col=col[4],
+                      plot=3)
+  
+  M2FEptrace <- pointsTile(x=c(0, periods),
+                         y=c(initialY, M2FE$pe),
+                         pch=16,
+                         col=col[4],
+                         plot=3)
+  
+  # Set up text labels of lines
+  ###  text1 <- textTile(x=3.9,
+  ###                    y=M1RE$pe[length(M1RE$pe)],
+  ###                    labels="+$.60/pack",
+  ###                    col=col[1],
+  ###                    cex=0.75,
+  ###                    plot=1)
+  ###  
+  ###  text2 <- textTile(x=3.85,
+  ###                    y=BASE$pe[length(BASE$pe)],
+  ###                    labels="baseline",
+  ###                    col=col[2],
+  ###                    cex=0.75,
+  ###                    plot=1)
+  ###  
+  ###  text3 <- textTile(x=3.85,
+  ###                    y=M1FE$pe[length(M1FE$pe)],
+  ###                    labels="change\nin packs",
+  ###                    col=col[3],
+  ###                    cex=0.75,
+  ###                    plot=2)
+  ###  
+  ###  text4 <- textTile(x=3.85,
+  ###                    y=100*(M2FE$pe[length(M2FE$pe)] -1), 
+  ###                    labels="percent\nchange",
+  ###                    col=col[4],
+  ###                    cex=0.75,
+  ###                    plot=3)
+  
+  # Set up baseline: for first difference, this is 0
+  #baselineM1FE <- linesTile(x=c(-1,5),
+  #                          y=c(0,0),
+  #                          plot=2)
+  
+  # Set up baseline: for percent change, this is 0
+  #baselineM2FE <- linesTile(x=c(-1,5),
+  #                          y=c(0, 0),
+  #                          plot=3)
+  
+  # Plot all traces using tile
+  tile(M1REtrace, M2REtrace, M1FEtrace, M2FEtrace,
+       M1REptrace, M2REptrace, M1FEptrace, M2FEptrace,
+      #text1, text2, text3, text4,
+      #baselineM1FE, baselineM2FE,
+       limits=rbind(c(-1,1,limitsM1RE),
+                    c(-1,1,limitsM2RE),
+                    c(-1,1,limitsM1FE),
+                    c(-1,1,limitsM2FE)),
+       xaxis=list(at=c(0,periods), labels=c("t", "t+1", "t+2")), #"t+3")),
+       yaxis=list(label.loc=-0.5, major=FALSE),
+       xaxistitle=list(labels="Forecast Year"),
+       yaxistitle=list(labels1="Expected change in Democratic House Share",
+                       labels2="Change, Packs per capita",
+                       labels3="%Change, Packs per capita"),
+       maintitle=list(labels=main),
+       gridlines=list(type="y"),
+       height=list(maintitle=4),
+       width=list(null=5,yaxistitle=4,yaxis.labelspace=-0.5),
+       output=list(file=file,width=10)
+  )
+  
+}
+
+```  
+
+```{r c22, echo=FALSE}
+t <- c(0,1,2)
+
+par(mfrow=c(2,2))
+
+plot(M1REtrace$y~t, type="l", ylim = c(0.35,0.85), 
+     ylab = "Dem House Share", main = "M1RE", xaxt="n")
+axis(1, at=c(0, 1, 2), labels=c("2017","2019","2021"))
+lines(M1REtrace$lower~t, type="l", lty = 3)
+lines(M1REtrace$upper~t, type="l", lty = 3)
+
+plot(M2REtrace$y~t, type="l", ylim = c(0.35,0.85), 
+     ylab = "Dem House Share", main = "M2RE", xaxt="n")
+axis(1, at=c(0, 1, 2), labels=c("2017","2019","2021"))
+lines(M2REtrace$lower~t, type="l", lty = 3)
+lines(M2REtrace$upper~t, type="l", lty = 3)
+
+plot(M1FEtrace$y~t, type="l", ylim = c(0.35,0.85), 
+     ylab = "Dem House Share", main = "M1FE", xaxt="n")
+axis(1, at=c(0, 1, 2), labels=c("2017","2019","2021"))
+lines(M1FEtrace$lower~t, type="l", lty = 3)
+lines(M1FEtrace$upper~t, type="l", lty = 3)
+
+plot(M2FEtrace$y~t, type="l", ylim = c(0.35,0.85), 
+     ylab = "Dem House Share", main = "M2FE", xaxt="n")
+axis(1, at=c(0, 1, 2), labels=c("2017","2019","2021"))
+lines(M2FEtrace$lower~t, type="l", lty = 3)
+lines(M2FEtrace$upper~t, type="l", lty = 3)
+
+```  
+
+*As we can see the models vary substantially, especially those with state and year interactions. All of them predict the Democrats will increase their share of seats with a Dem take over of governorship (in the average state) and the presidency--and assuming unemployment rate stays relatively low; however, M1 (and M2FE) are more conservative. The variance in the prediction interval is definitely wider in the fixed effect models. FE models do conceive of Democrats losing seats.*  
+
+## (h)  
+*Given the above results, I would propose M2FE. Why? It allows for a loss of seats--which can be possible. The expected share is up but it's not outlandishly so as in M2RE. Also, FE models are more flexible given the state intercepts. This can be advantageous as we gather new data and we see that some of these 28 states may have a heterogeneous change (like the rise of Tea Party or MAGA movements), a FE would be more flexible to capture such effect.* 
+*The main difference these models make is really involved with their predicted variance (excluding M2RE). I believe that in election forecasts is very difficult to have narrow predicted intervals because "surprising" outcomes are typical. In that sense, it makes a difference which model we choose.*
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
